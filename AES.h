@@ -465,20 +465,43 @@ enum AES_MODELS
 
 void _aesFill(const uint8_t *text, uint8_t *padding, uint32_t text_len)
 {
-    if (text_len % 8 == 0)
+    if (text_len % KEYLEN == 0)
     {
-        for (int i=0; i < text_len; i++)
+        for (int i = 0; i < text_len; i++)
         {
             padding[i] = text[i];
         }
     }
     else
     {
-        
+        for (int i = 0; i < text_len - KEYLEN; i += KEYLEN)
+        {
+            for (int j = i; j < i + 8; j++)
+            {
+                padding[j] = text[j];
+            }
+        }
+        uint8_t padder = KEYLEN - (text_len % KEYLEN);
+        for (int i = 0; i < KEYLEN; i++)
+        {
+            if (i < KEYLEN - padder)
+            {
+                padding[text_len / 8 * 8 + i] = text[text_len / 8 * 8 + i];
+            }
+            else
+            {
+                padding[text_len / 8 * 8 + i] = padder;
+            }
+        }
     }
 }
 
-uint8_t* AES_decrypt(const uint8_t *key, const uint8_t *ciphertext, uint32_t len, int model, uint8_t iv = NULL)
+void _aesXor(uint8_t* a, uint8_t* b, uint8_t* res)
+{
+
+}
+
+uint8_t *AES_decrypt(const uint8_t *key, const uint8_t *ciphertext, uint32_t len, int model, uint8_t *iv = NULL)
 {
     uint32_t padding_len = 0;
     if (len % 8 == 0)
@@ -496,13 +519,14 @@ uint8_t* AES_decrypt(const uint8_t *key, const uint8_t *ciphertext, uint32_t len
     switch (model)
     {
     case ECB:
-        for (int i = 0; i < len; i += KEYLEN)
+        for (int i = 0; i < padding_len; i += KEYLEN)
         {
             _aesDec(key, KEYLEN, padding + i, res + i, KEYLEN);
         }
         break;
     case CBC:
-            break;
+        
+        break;
     case OFB:
         break;
     case CFB:
