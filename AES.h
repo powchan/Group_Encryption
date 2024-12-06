@@ -465,43 +465,65 @@ enum AES_MODELS
 
 void _aesFill(const uint8_t *text, uint8_t *padding, uint32_t text_len)
 {
-    if (text_len % KEYLEN == 0)
+    memcpy(padding, text, text_len);
+    if (text_len % KEYLEN != 0)
     {
-        for (int i = 0; i < text_len; i++)
-        {
-            padding[i] = text[i];
-        }
-    }
-    else
-    {
-        for (int i = 0; i < text_len - KEYLEN; i += KEYLEN)
-        {
-            for (int j = i; j < i + 8; j++)
-            {
-                padding[j] = text[j];
-            }
-        }
         uint8_t padder = KEYLEN - (text_len % KEYLEN);
-        for (int i = 0; i < KEYLEN; i++)
+        for (int i = KEYLEN - padder; i < KEYLEN; i++)
         {
-            if (i < KEYLEN - padder)
-            {
-                padding[text_len / 8 * 8 + i] = text[text_len / 8 * 8 + i];
-            }
-            else
-            {
-                padding[text_len / 8 * 8 + i] = padder;
-            }
+            padding[text_len / 8 * 8 + i] = padder;
         }
     }
 }
 
-void _aesXor(uint8_t* a, uint8_t* b, uint8_t* res)
+void _aesXor(uint8_t *a, uint8_t *b, uint8_t *res, int len)
 {
-
+    for (int i = 0; i < len; i++)
+    {
+        res[i] = a[i] ^ b[i];
+    }
 }
 
-uint8_t *AES_decrypt(const uint8_t *key, const uint8_t *ciphertext, uint32_t len, int model, uint8_t *iv = NULL)
+#define NONCE_SIZE 14
+#define COUNTER_SIZE 2 // 如果需要更多计数器字节，可以调整
+
+void AES_CTR_Process(const uint8_t *key, const uint8_t *nonce, uint8_t *counter,  uint8_t *input, uint8_t *output, uint32_t len) {
+    AesKey aesKey;
+    keyExpansion(key, 16, &aesKey);
+    uint8_t counter_block[16];
+    memcpy(counter_block, nonce, NONCE_SIZE);
+    memcpy(counter_block + NONCE_SIZE, counter, COUNTER_SIZE);
+
+    for (uint32_t i = 0; i < len; i += BLOCKSIZE) {
+        uint8_t keystream[16];
+        _aesEnc(key, KEYLEN, counter_block, keystream, BLOCKSIZE);
+        _aesXor(input + i, keystream, output + i, BLOCKSIZE);
+
+        // 递增计数器
+        for (int j = 15; j >= 14; --j) { // 仅递增Counter部分
+            if (++counter_block[j] != 0)
+                break;
+        }
+    }
+}
+
+void AES_CTR_Encrypt(const uint8_t *key, uint32_t keyLen, uint8_t *plaintext, uint8_t *ciphertext, uint32_t len, const uint8_t *iv) {
+    uint8_t nonce[NONCE_SIZE];
+    uint8_t counter[COUNTER_SIZE];
+    memcpy(nonce, iv, NONCE_SIZE);
+    memcpy(counter, iv + NONCE_SIZE, COUNTER_SIZE);
+    AES_CTR_Process(key, nonce, counter, plaintext, ciphertext, len);
+}
+
+void AES_CTR_Decrypt(const uint8_t *key, uint32_t keyLen, uint8_t *ciphertext, uint8_t *plaintext, uint32_t len, const uint8_t *iv) {
+    uint8_t nonce[NONCE_SIZE];
+    uint8_t counter[COUNTER_SIZE];
+    memcpy(nonce, iv, NONCE_SIZE);
+    memcpy(counter, iv + NONCE_SIZE, COUNTER_SIZE);
+    AES_CTR_Process(key, nonce, counter, ciphertext, plaintext, len);
+}
+
+void AES_decrypt(const uint8_t *key,  uint8_t *ciphertext, uint8_t *res, uint32_t len, int model, uint8_t *iv)
 {
     uint32_t padding_len = 0;
     if (len % 8 == 0)
@@ -512,8 +534,7 @@ uint8_t *AES_decrypt(const uint8_t *key, const uint8_t *ciphertext, uint32_t len
     {
         padding_len = ((len / 8) * 8) + 1;
     }
-    uint8_t padding[padding_len];
-    uint8_t res[padding_len];
+    uint8_t *padding = (uint8_t *)malloc(padding_len);
     _aesFill(ciphertext, padding, len);
 
     switch (model)
@@ -525,89 +546,94 @@ uint8_t *AES_decrypt(const uint8_t *key, const uint8_t *ciphertext, uint32_t len
         }
         break;
     case CBC:
-        
+        for (int i = padding_len - KEYLEN; i >= 0; i -= KEYLEN)
+        {
+            _aesDec(key, KEYLEN, padding + i, res + i, KEYLEN);
+            if (i == 0)
+            {
+                _aesXor(res + i, iv, res + i, KEYLEN);
+            }
+            else
+            {
+                _aesXor(res + i, padding + i - KEYLEN, res + i, KEYLEN);
+            }
+        }
         break;
     case OFB:
+        for (int i = 0; i < padding_len; i += KEYLEN)
+        {
+            _aesEnc(key, KEYLEN, iv, iv, KEYLEN);
+            _aesXor(padding + i, iv, res + i, KEYLEN);
+        }
         break;
     case CFB:
+        for (int i = 0; i < padding_len; i += KEYLEN)
+        {
+            _aesEnc(key, KEYLEN, iv, iv, KEYLEN);
+            _aesXor(padding + i, iv, res + i, KEYLEN);
+            memcpy(iv, padding + i, KEYLEN);
+        }
         break;
     case CTR:
+        AES_CTR_Decrypt(key, KEYLEN, ciphertext, res, len, iv); // 使用新的CTR处理函数
         break;
     default:
         break;
     }
-    return res;
+    free(padding);
 }
 
-void AES_encrypt(const uint8_t *key, uint32_t keyLen, const uint8_t *plaintext, uint8_t *res, uint32_t len, int model)
+void AES_encrypt(const uint8_t *key, uint32_t keyLen,  uint8_t *plaintext, uint8_t *res, uint32_t len, int model, uint8_t *iv)
 {
+    uint32_t padding_len = 0;
+    if (len % 8 == 0)
+    {
+        padding_len = len;
+    }
+    else
+    {
+        padding_len = ((len / 8) * 8) + 1;
+    }
+    uint8_t *padding = (uint8_t *)malloc(padding_len);
+    _aesFill(plaintext, padding, len);
+
     switch (model)
     {
     case ECB:
+        for (int i = 0; i < padding_len; i += KEYLEN)
+        {
+            _aesEnc(key, KEYLEN, padding + i, res + i, KEYLEN);
+        }
         break;
     case CBC:
+        for (int i = 0; i < padding_len; i += KEYLEN)
+        {
+            _aesXor(padding + i, iv, iv, KEYLEN);
+            _aesEnc(key, KEYLEN, iv, res + i, KEYLEN);
+            memcpy(iv, res + i, KEYLEN);
+        }
         break;
     case OFB:
+        for (int i = 0; i < padding_len; i += KEYLEN)
+        {
+            _aesEnc(key, KEYLEN, iv, iv, KEYLEN);
+            _aesXor(padding + i, iv, res + i, KEYLEN);
+        }
         break;
     case CFB:
+        for (int i = 0; i < padding_len; i += KEYLEN)
+        {
+            _aesEnc(key, KEYLEN, iv, iv, KEYLEN);
+            _aesXor(padding + i, iv, res + i, KEYLEN);
+            memcpy(iv, res + i, KEYLEN);
+        }
         break;
     case CTR:
+        AES_CTR_Encrypt(key, KEYLEN, plaintext, res, len, iv); // 使用新的CTR处理函数
         break;
     default:
         break;
     }
+    free(padding);
 }
 
-// int main()
-// {
-//     const uint8_t k[16] = "1234567812345678";
-//     const uint8_t ct[16] = {0x23, 0x13, 0xee, 0xd2, 0x0b, 0x29, 0x6a, 0xe6, 0x4d, 0x9e, 0x57, 0xc9, 0x90, 0xe5, 0x73, 0xd0};
-//     uint8_t r[16];
-//     aesDecrypt(k, 16, ct, r, 16);
-//     write(1, r, 16);
-
-//     uint8_t key[16] = "\0";
-//     uint8_t text[16] = "\0";
-//     uint8_t res[16];
-//     int mode;
-//     while (1)
-//     {
-
-//         printf(
-//             "0: exit\n"
-//             "1: encrypt\n"
-//             "2: decrypt\n"
-//             "Choice: ");
-//         scanf("%d", &mode);
-
-//         switch (mode)
-//         {
-//         case 0:
-//             exit(0);
-//             break;
-//         case 1:
-//             printf("Input key: ");
-//             read(0, key, 16);
-//             printf("Input text: ");
-//             read(0, text, 16);
-//             aesEncrypt(key, 16, text, res, 16);
-//             printf("Result: ");
-//             fwrite(res, 1, 16, stdout);
-//             puts("");
-//             break;
-//         case 2:
-//             printf("Input key: ");
-//             read(0, key, 16);
-//             printf("Input text: ");
-//             read(0, text, 16);
-//             aesDecrypt(key, 16, text, res, 16);
-//             printf("Result: ");
-//             fwrite(res, 1, 16, stdout);
-//             puts("");
-//             break;
-//         default:
-//             break;
-//         }
-//     }
-
-// }
